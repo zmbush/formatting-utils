@@ -1,97 +1,171 @@
-use std::{collections::HashMap, fs::File, path::PathBuf};
+mod downloadables;
+mod gdrive;
+mod gui;
 
-use clap::{Parser, Subcommand};
+use std::{fs::File, path::PathBuf, time::Duration};
 
-#[derive(Parser)]
+use anyhow::{anyhow, Context as _};
+use clap::{Args, Parser, Subcommand};
+use eframe::egui;
+
+#[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    cmd: Commands,
+    cmd: Option<Commands>,
+
+    #[arg(long)]
+    token_cache: Option<PathBuf>,
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Debug)]
+struct ImageColumn {
+    column: String,
+    suffix: String,
+}
+
+fn parse_image_column(c: &str) -> Result<ImageColumn, anyhow::Error> {
+    if let Some((column, suffix)) = c.split_once(":") {
+        Ok(ImageColumn {
+            column: column.to_string(),
+            suffix: suffix.to_string(),
+        })
+    } else {
+        Err(anyhow!("Invalid format for image column: {c}"))
+    }
+}
+
+#[derive(Args, Debug)]
+struct DownloadImages {
+    #[arg(short, long)]
+    creator_column: String,
+
+    #[arg(short, long)]
+    extra_info_column: Option<String>,
+
+    #[arg(short, long, value_parser = parse_image_column)]
+    image_column: Vec<ImageColumn>,
+
+    #[arg(short, long)]
+    prefix: Option<String>,
+
+    #[arg(short, long)]
+    suffix: Option<String>,
+
+    filename: PathBuf,
+}
+
+#[derive(Subcommand, Debug)]
 enum Commands {
-    DownloadImages {
-        #[arg(short, long)]
-        creator_column: String,
-
-        #[arg(short, long)]
-        extra_info_column: Option<String>,
-
-        #[arg(short, long)]
-        image_column: String,
-
-        #[arg(short, long)]
-        prefix: Option<String>,
-
-        #[arg(short, long)]
-        suffix: Option<String>,
-
-        filename: String,
-        output_dir: String,
-    },
+    DownloadImages(DownloadImages),
 }
 
-#[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
-    let cli = Cli::parse();
+#[derive(Copy, Clone)]
+struct DownloaderContext<'a> {
+    global_prefix: &'a str,
+    global_suffix: &'a str,
+}
 
-    match cli.cmd {
-        Commands::DownloadImages {
-            creator_column,
-            extra_info_column,
-            image_column,
-            prefix,
-            suffix,
-            filename,
-            output_dir,
-        } => {
-            for row in csv::Reader::from_path(filename)?.deserialize::<HashMap<String, String>>() {
-                let row = row?;
+struct Downloader<'a> {
+    dir: PathBuf,
+    ctx: DownloaderContext<'a>,
+    extra_info: &'a str,
+    contrib: &'a str,
+    suffix: &'a str,
+}
 
-                let contrib = &row[&creator_column];
-                let url = &row[&image_column];
-                let target_fname_prefix = format!(
-                    "{prefix}{contrib}{extra}{suffix}",
-                    prefix = prefix.as_deref().unwrap_or("ICON - "),
-                    extra = extra_info_column
-                        .as_ref()
-                        .map(|c| format!(" - {}", row[c]))
-                        .unwrap_or_default(),
-                    suffix = suffix.as_deref().unwrap_or("")
-                );
-
-                if let Some((_, id)) =
-                    lazy_regex::regex_captures!("https://drive.google.com/file/d/([^/]+).*", url)
-                {
-                    let dl_url = format!("https://drive.google.com/uc?export=download&id={id}");
-                    let response = reqwest::get(dl_url).await?;
-                    let (_, filename) = lazy_regex::regex_captures!(
-                        r#"filename="?([^"]*)"?"#,
-                        response
-                            .headers()
-                            .get(reqwest::header::CONTENT_DISPOSITION)
-                            .and_then(|disposition| disposition.to_str().ok())
-                            .unwrap_or("attachment; filename=\"unknown.png\"")
-                    )
-                    .unwrap_or(("", "unknown.png"));
-                    let filename = PathBuf::from(filename);
-                    let final_filename = format!(
-                        "{output_dir}/{target_fname_prefix}.{}",
-                        filename
-                            .extension()
-                            .and_then(|ext| ext.to_str())
-                            .unwrap_or("png")
-                    );
-                    let mut file = File::create(final_filename)?;
-                    let mut content = std::io::Cursor::new(response.bytes().await?);
-                    std::io::copy(&mut content, &mut file)?;
-                } else {
-                    println!("{}'s icon needs a manual download: {}", contrib, url);
-                }
-            }
-        }
+impl Downloader<'_> {
+    fn save<F, D>(&self, file_name: F, data: D) -> Result<(), anyhow::Error>
+    where
+        F: AsRef<std::ffi::OsStr>,
+        D: AsRef<[u8]>,
+    {
+        std::fs::create_dir_all(&self.dir).with_context(|| {
+            format!("Could not create containing folder {}", self.dir.display())
+        })?;
+        let final_filename = self.dir.join(file_name.as_ref());
+        let mut file = File::create(&final_filename)
+            .with_context(|| format!("While opening {}", final_filename.display()))?;
+        let mut content = std::io::Cursor::new(data);
+        std::io::copy(&mut content, &mut file)?;
+        Ok(())
     }
 
-    Ok(())
+    fn base_name(&self) -> String {
+        format!(
+            "{prefix}{contrib}{extra} - {column_suffix}{global_suffix}",
+            prefix = self.ctx.global_prefix,
+            contrib = self.contrib,
+            column_suffix = self.suffix,
+            extra = self.extra_info,
+            global_suffix = self.ctx.global_suffix,
+        )
+        .replace(['/', '\\'], "_")
+    }
+
+    fn file_name<F: AsRef<std::path::Path>>(&self, filename: F) -> String {
+        format!(
+            "{}.{}",
+            self.base_name(),
+            filename
+                .as_ref()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("png")
+        )
+    }
+
+    fn subdir<D: AsRef<std::path::Path>>(&self, dir: D) -> Downloader {
+        Downloader {
+            dir: self.dir.join(dir.as_ref()),
+
+            ..*self
+        }
+    }
+}
+
+fn main() -> Result<(), anyhow::Error> {
+    let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
+    let _enter = rt.enter();
+    std::thread::spawn(move || {
+        rt.block_on(async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        })
+    });
+
+    let cli = Cli::parse();
+    println!("{cli:?}");
+    match cli.cmd {
+        None => {
+            // GUI!
+            let options = eframe::NativeOptions {
+                viewport: egui::ViewportBuilder::default().with_inner_size([640.0, 240.0]),
+                ..Default::default()
+            };
+            Ok(eframe::run_native(
+                "Formatting Utils",
+                options,
+                Box::new(|_cc| Ok(Box::new(gui::Ui::from_token_cache(cli.token_cache)))),
+            )
+            .map_err(|e| anyhow::anyhow!("E: {e:?}"))?)
+        }
+        Some(Commands::DownloadImages(download_images)) => {
+            let (tx, rx) = std::sync::mpsc::channel();
+
+            tokio::spawn(async move {
+                let hub = gdrive::drive_hub(None, cli.token_cache).await;
+                downloadables::download(download_images, &hub, |curr, max| {
+                    let _ = tx.send((curr, max));
+                })
+                .await
+                .expect("downloa dsec");
+            });
+            while let Ok((curr, max)) = rx.recv() {
+                println!("{}%", (curr as f32 / max as f32) * 100.0);
+            }
+            Ok(())
+        }
+    }
 }

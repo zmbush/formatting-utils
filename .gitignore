@@ -1,3 +1,6 @@
 /target
 icons
-sticker-trove
+outputs
+inputs
+clientsecret.json
+tokencache.json
