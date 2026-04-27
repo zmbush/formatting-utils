@@ -9,17 +9,18 @@ use http_body_util::BodyExt as _;
 use std::{collections::HashMap, future::Future, path::PathBuf, pin::Pin};
 
 pub(crate) async fn download(
-    DownloadImages {
+    download_images: DownloadImages,
+    drive_hub: &gdrive::Hub,
+    mut status: impl FnMut(usize, usize),
+) -> Result<(), anyhow::Error> {
+    let DownloadImages {
         creator_column,
         extra_info_column,
         image_column,
         prefix,
         suffix,
         filename,
-    }: DownloadImages,
-    drive_hub: &gdrive::Hub,
-    mut status: impl FnMut(usize, usize),
-) -> Result<(), anyhow::Error> {
+    } = download_images;
     let global_prefix = prefix
         .as_deref()
         .map(|c| format!("{} - ", c))
@@ -113,7 +114,7 @@ impl<'a, C: Connector> Downloadables<'a, C> {
         for dl in &self.0 {
             if let Some(id) = dl.matches(url) {
                 if let Err(e) = dl.download(id, downloader).await {
-                    println!("Failed to download: {e:?}");
+                    // println!("Failed to download: {e:?}");
                 } else {
                     return true;
                 }

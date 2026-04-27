@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use eframe::egui::{self, RichText, Widget as _};
+use eframe::egui::{self, Widget as _};
 use google_drive3::yup_oauth2::authenticator_delegate::InstalledFlowDelegate;
 use tokio::sync::mpsc;
 
@@ -31,6 +31,9 @@ async fn display_auth(
         url: url.to_string(),
         need_code,
         tx,
+
+        auth_started: false,
+        code: String::new(),
     });
 
     let resp = rx
@@ -53,6 +56,8 @@ struct MaybeImageColumn {
 struct AuthState {
     url: String,
     need_code: bool,
+    code: String,
+    auth_started: bool,
     tx: mpsc::Sender<String>,
 }
 
@@ -122,7 +127,7 @@ impl eframe::App for Ui {
                         egui::ViewportId::from_hash_of("authentication window"),
                         egui::ViewportBuilder::default()
                             .with_title("Google Drive Authentication")
-                            .with_inner_size(&[200.0, 100.0])
+                            .with_inner_size([200.0, 100.0])
                             .with_resizable(false),
                         |ctx, class| {
                             assert!(
@@ -137,18 +142,38 @@ impl eframe::App for Ui {
                                 )
                                 .halign(egui::Align::Center)
                                 .ui(ui);
-                                if ui.button("Click Here To Begin").clicked() {
+
+                                if auth_state.auth_started {
+                                    if ui.text_edit_singleline(&mut auth_state.code).lost_focus()
+                                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                    {
+                                        // Enter was pressed
+                                        tokio::spawn({
+                                            let tx = auth_state.tx.clone();
+                                            let mut code = String::new();
+                                            std::mem::swap(&mut auth_state.code, &mut code);
+                                            async move {
+                                                println!("RUNNING SEND OF TX");
+                                                let _ = tx.send(code).await;
+                                            }
+                                        });
+                                    }
+                                } else if ui.button("Click Here To Begin").clicked() {
                                     ctx.open_url(egui::OpenUrl {
                                         url: auth_state.url.clone(),
                                         new_tab: true,
                                     });
-                                    tokio::spawn({
-                                        let tx = auth_state.tx.clone();
-                                        async move {
-                                            println!("RUNNING SEND OF TX");
-                                            let _ = tx.send(String::new()).await;
-                                        }
-                                    });
+                                    if !auth_state.need_code {
+                                        tokio::spawn({
+                                            let tx = auth_state.tx.clone();
+                                            async move {
+                                                println!("RUNNING SEND OF TX");
+                                                let _ = tx.send(String::new()).await;
+                                            }
+                                        });
+                                    } else {
+                                        auth_state.auth_started = true;
+                                    }
                                 }
                             });
                         },
@@ -242,15 +267,17 @@ impl eframe::App for Ui {
                                 &mut self.new_image_column.column,
                                 "- column -",
                             );
-                            ui.text_edit_singleline(&mut self.new_image_column.suffix);
-                            if ui
-                                .add_enabled(
-                                    self.new_image_column.column.is_some()
-                                        && !self.new_image_column.suffix.is_empty(),
-                                    egui::Button::new("+"),
-                                )
-                                .clicked()
-                            {
+                            let submittable = self.new_image_column.column.is_some()
+                                && !self.new_image_column.suffix.is_empty();
+                            let submitted = (ui
+                                .text_edit_singleline(&mut self.new_image_column.suffix)
+                                .lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                && submittable)
+                                || ui
+                                    .add_enabled(submittable, egui::Button::new("+"))
+                                    .clicked();
+                            if submitted {
                                 let mut new_image_column = Default::default();
                                 std::mem::swap(&mut new_image_column, &mut self.new_image_column);
                                 self.image_columns.push(ImageColumn {

@@ -16,7 +16,11 @@ pub(crate) async fn drive_hub(
         .expect("clientsecret.json");
     let mut builder = yup_oauth2::InstalledFlowAuthenticator::builder(
         secret,
-        yup_oauth2::InstalledFlowReturnMethod::HTTPRedirect,
+        if flow_delegate.is_some() {
+            yup_oauth2::InstalledFlowReturnMethod::Interactive
+        } else {
+            yup_oauth2::InstalledFlowReturnMethod::HTTPRedirect
+        },
     )
     .persist_tokens_to_disk(token_cache.unwrap_or_else(|| "tokencache.json".into()));
     if let Some(delegate) = flow_delegate {
