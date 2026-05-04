@@ -115,7 +115,7 @@ impl Downloader<'_> {
         )
     }
 
-    fn subdir<D: AsRef<std::path::Path>>(&self, dir: D) -> Downloader {
+    fn subdir<D: AsRef<std::path::Path>>(&'_ self, dir: D) -> Downloader<'_> {
         Downloader {
             dir: self.dir.join(dir.as_ref()),
 

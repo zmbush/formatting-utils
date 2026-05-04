@@ -113,9 +113,7 @@ impl<'a, C: Connector> Downloadables<'a, C> {
     pub(crate) async fn download<'b>(&'b self, url: &str, downloader: &'b Downloader<'b>) -> bool {
         for dl in &self.0 {
             if let Some(id) = dl.matches(url) {
-                if let Err(e) = dl.download(id, downloader).await {
-                    // println!("Failed to download: {e:?}");
-                } else {
+                if dl.download(id, downloader).await.is_ok() {
                     return true;
                 }
             }
@@ -185,7 +183,7 @@ pub(crate) struct DriveDirectory<'h> {
 }
 
 impl DriveDirectory<'_> {
-    fn new(hub: &gdrive::Hub) -> DriveDirectory {
+    fn new(hub: &'_ gdrive::Hub) -> DriveDirectory<'_> {
         DriveDirectory { hub, nested: false }
     }
 }
