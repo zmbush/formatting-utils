@@ -6,7 +6,10 @@ use google_drive3::{
     hyper_util::client::legacy::connect::HttpConnector,
 };
 use http_body_util::BodyExt as _;
+use reqwest::{header, Client};
 use std::{collections::HashMap, future::Future, path::PathBuf, pin::Pin};
+
+mod ellipsus;
 
 pub(crate) async fn download(
     download_images: DownloadImages,
@@ -19,7 +22,7 @@ pub(crate) async fn download(
         image_column,
         prefix,
         suffix,
-        filename,
+        file,
     } = download_images;
     let global_prefix = prefix
         .as_deref()
@@ -39,13 +42,19 @@ pub(crate) async fn download(
     downloadables.register(DriveDirectory::new(drive_hub));
     downloadables.register(DriveDocument(drive_hub));
     downloadables.register(Dropbox);
+    downloadables.register(Imgur);
+    downloadables.register(Catbox);
+    downloadables.register(ellipsus::Ellipsus);
     downloadables.register(GenericFile);
 
     let mut output_dir = PathBuf::new();
     output_dir.push("outputs");
-    output_dir.push(filename.file_stem().unwrap());
+    output_dir.push("ANSOTEHUNATOHEUNTAHOEU");
+    // output_dir.push(filename.file_stem().unwrap());
 
-    let file = csv::Reader::from_path(&filename)?
+    let file = file
+        .csv_reader()
+        .await?
         .deserialize::<HashMap<String, String>>()
         .collect::<Vec<_>>();
     let max = file.len();
@@ -344,6 +353,95 @@ impl<C: Connector> Downloadable<C> for Dropbox {
             let final_filename = downloader.file_name(filename);
 
             downloader.save(final_filename, response.bytes().await?)
+        })
+    }
+}
+
+pub(crate) struct Imgur;
+
+impl Imgur {
+    async fn try_ext<'a>(
+        &'a self,
+        id: &str,
+        downloader: &'a Downloader<'a>,
+        ext: &str,
+    ) -> Result<(), anyhow::Error> {
+        let dl_url = format!("https://i.imgur.com/{id}.{ext}");
+        let response = reqwest::get(dl_url).await?;
+        let filename = format!("{id}.{ext}");
+        let final_filename = downloader.file_name(filename);
+        downloader.save(final_filename, response.bytes().await?)
+    }
+}
+
+impl<C: Connector> Downloadable<C> for Imgur {
+    fn matches(&self, url: &str) -> Option<String> {
+        Some(
+            lazy_regex::regex_captures!("https://imgur.com/([^?]*)", url)?
+                .1
+                .to_string(),
+        )
+    }
+
+    fn download<'a>(
+        &'a self,
+        id: String,
+        downloader: &'a Downloader<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
+        Box::pin(async move {
+            for ext in &["png", "jpg", "jpeg", "gif", "tif", "tiff"] {
+                if self.try_ext(&id, downloader, ext).await.is_ok() {
+                    return Ok(());
+                }
+            }
+            Err(anyhow::anyhow!("No imgur url found"))
+        })
+    }
+}
+
+pub(crate) struct Catbox;
+impl<C: Connector> Downloadable<C> for Catbox {
+    fn matches(&self, url: &str) -> Option<String> {
+        if url.contains("catbox.moe") {
+            Some(url.to_string())
+        } else {
+            None
+        }
+    }
+
+    fn download<'a>(
+        &self,
+        url: String,
+        downloader: &'a Downloader<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
+        Box::pin(async move {
+            let final_filename = downloader.file_name(&url);
+
+            // Try to convince catbox we're a real web browser.
+            let mut headers = header::HeaderMap::new();
+            headers.insert(
+                header::USER_AGENT,
+                header::HeaderValue::from_static(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                     (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                ),
+            );
+            headers.insert(
+                header::ACCEPT,
+                header::HeaderValue::from_static(
+                    "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                ),
+            );
+
+            let client = Client::builder()
+                .http1_only()
+                .default_headers(headers)
+                .build()?;
+
+            downloader.save(
+                final_filename,
+                client.get(&url).send().await?.bytes().await?,
+            )
         })
     }
 }

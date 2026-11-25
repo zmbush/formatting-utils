@@ -7,7 +7,7 @@ use eframe::egui::{self, Widget as _};
 use google_drive3::yup_oauth2::authenticator_delegate::InstalledFlowDelegate;
 use tokio::sync::mpsc;
 
-use crate::{DownloadImages, ImageColumn};
+use crate::{DownloadImages, FileInput, ImageColumn};
 
 struct GuiFlowDelegate(Arc<Mutex<Option<AuthState>>>);
 impl InstalledFlowDelegate for GuiFlowDelegate {
@@ -316,7 +316,10 @@ impl eframe::App for Ui {
                                         image_column: data.image_columns,
                                         prefix: None,
                                         suffix: None,
-                                        filename: data.filename.unwrap(),
+                                        file: FileInput::Local(
+                                            data.filename
+                                                .expect("Filename must be set at this point"),
+                                        ),
                                     },
                                     &hub,
                                     move |curr, max| {

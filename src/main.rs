@@ -1,12 +1,16 @@
+#![deny(unused)]
+
 mod downloadables;
 mod gdrive;
 mod gui;
 
-use std::{fs::File, path::PathBuf, time::Duration};
+use std::{fs::File, io::Cursor, path::PathBuf, time::Duration};
 
 use anyhow::{anyhow, Context as _};
+use bytes::Bytes;
 use clap::{Args, Parser, Subcommand};
 use eframe::egui;
+use reqwest::Url;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -25,13 +29,71 @@ struct ImageColumn {
 }
 
 fn parse_image_column(c: &str) -> Result<ImageColumn, anyhow::Error> {
-    if let Some((column, suffix)) = c.split_once(":") {
+    if let Some((column, suffix)) = c.rsplit_once(":") {
         Ok(ImageColumn {
             column: column.to_string(),
             suffix: suffix.to_string(),
         })
     } else {
         Err(anyhow!("Invalid format for image column: {c}"))
+    }
+}
+
+#[derive(Debug, Clone)]
+enum FileInput {
+    Local(PathBuf),
+    Remote(Url),
+}
+
+impl std::str::FromStr for FileInput {
+    type Err = !;
+
+    fn from_str(s: &str) -> Result<Self, !> {
+        if let Ok(url) = Url::parse(s) {
+            if url.scheme().len() > 1 {
+                return Ok(FileInput::Remote(url));
+            }
+        }
+        Ok(FileInput::Local(PathBuf::from(s)))
+    }
+}
+
+enum InputReader {
+    Local(File),
+    Remote(Cursor<Bytes>),
+}
+
+impl std::io::Read for InputReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            InputReader::Local(file) => file.read(buf),
+            InputReader::Remote(bytes) => bytes.read(buf),
+        }
+    }
+}
+
+impl FileInput {
+    async fn csv_reader(&self) -> Result<csv::Reader<InputReader>, anyhow::Error> {
+        Ok(match self {
+            FileInput::Local(path_buf) => {
+                csv::ReaderBuilder::default().from_reader(InputReader::Local(File::open(path_buf)?))
+            }
+            FileInput::Remote(url) => {
+                let id = url
+                    .path()
+                    .strip_prefix("/spreadsheets/d/")
+                    .ok_or_else(|| anyhow!("Not a spreadsheets url"))?
+                    .split('/')
+                    .next()
+                    .expect("there should always be one");
+                let url =
+                    format!("https://docs.google.com/spreadsheets/d/{id}/gviz/tq?tqx=out:csv");
+                println!("Requesting: {url}");
+                csv::ReaderBuilder::default().from_reader(InputReader::Remote(Cursor::new(
+                    reqwest::get(url).await?.bytes().await?,
+                )))
+            }
+        })
     }
 }
 
@@ -52,7 +114,7 @@ struct DownloadImages {
     #[arg(short, long)]
     suffix: Option<String>,
 
-    filename: PathBuf,
+    file: FileInput,
 }
 
 #[derive(Subcommand, Debug)]
@@ -160,7 +222,7 @@ fn main() -> Result<(), anyhow::Error> {
                     let _ = tx.send((curr, max));
                 })
                 .await
-                .expect("downloa dsec");
+                .expect("failed to download images");
             });
             while let Ok((curr, max)) = rx.recv() {
                 println!("{}%", (curr as f32 / max as f32) * 100.0);
