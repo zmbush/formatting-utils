@@ -5,6 +5,7 @@ mod gdrive;
 mod gui;
 
 use std::{
+    collections::HashMap,
     fs::File,
     io::{Cursor, Write as _},
     path::PathBuf,
@@ -16,6 +17,7 @@ use bytes::Bytes;
 use clap::{Args, Parser, Subcommand};
 use eframe::egui;
 use indicatif::{ProgressBar, ProgressStyle};
+use lazy_regex::lazy_regex;
 use reqwest::Url;
 
 #[derive(Parser, Debug)]
@@ -142,9 +144,24 @@ struct DownloadImages {
     file: FileInput,
 }
 
+#[derive(Args, Debug)]
+struct ListSocials {
+    #[arg(short, long)]
+    creator_column: String,
+
+    #[arg(short, long)]
+    position_column: String,
+
+    #[arg(short, long)]
+    social_column: Vec<String>,
+
+    file: FileInput,
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     DownloadImages(DownloadImages),
+    ListSocials(ListSocials),
 }
 
 #[derive(Copy, Clone)]
@@ -311,5 +328,66 @@ async fn main() -> Result<(), anyhow::Error> {
             }
             Ok(())
         }
+        #[allow(unused)]
+        Some(Commands::ListSocials(ListSocials {
+            creator_column,
+            position_column,
+            social_column,
+            file,
+        })) => {
+            let file = file
+                .csv_reader()
+                .await?
+                .deserialize::<HashMap<String, String>>()
+                .collect::<Vec<_>>();
+            for row in file {
+                let row = row?;
+                let contrib = &row[&creator_column];
+                let position = &row[&position_column];
+
+                println!("{contrib} ({position})");
+                for col in &social_column {
+                    let link = &row[col];
+                    if link.trim().is_empty() {
+                        continue;
+                    }
+                    println!("  {}", social_link(link));
+                }
+                println!();
+            }
+            Ok(())
+        }
     }
+}
+
+static MAPPINGS: [(lazy_regex::Lazy<regex::Regex>, usize, &str); 8] = [
+    (
+        lazy_regex!("(https?://)?www.instagram.com/([^/?&]*)"),
+        2,
+        "i",
+    ),
+    (lazy_regex!("https://(x|twitter).com/([^/?&]*)"), 2, "t"),
+    (lazy_regex!("(https://)?www.tumblr.com/([^/?&]*)"), 2, "T"),
+    (lazy_regex!("(https://)?([^.]*).tumblr.com"), 2, "T"),
+    (
+        lazy_regex!("https://archiveofourown.org/users/([^/?&]*)"),
+        1,
+        "a",
+    ),
+    (
+        lazy_regex!("https://bsky.app/profile/([^/?&]*).bsky.social"),
+        1,
+        "b",
+    ),
+    (lazy_regex!("https://bsky.app/profile/([^/?&]*)"), 1, "b"),
+    (lazy_regex!("https://(.*).carrd.co"), 1, "c"),
+];
+fn social_link(s: &str) -> String {
+    for (re, index, prefix) in &MAPPINGS {
+        if let Some(caps) = re.captures(s) {
+            return format!("{prefix} {}", &caps[*index]);
+        }
+    }
+
+    s.into()
 }
