@@ -1,9 +1,4 @@
-use std::{
-    future::Future,
-    io::Write as _,
-    pin::Pin,
-    process::{Command, Stdio},
-};
+use std::{future::Future, pin::Pin};
 
 use anyhow::Context as _;
 use base64::prelude::*;
@@ -37,25 +32,7 @@ impl<C: Connector> Downloadable<C> for Ellipsus {
                 .await
                 .context("Failed to get ellipsus doc")?;
             let html = doc.contents().context("Failed to generate content")?;
-            let mut cmd = Command::new("pandoc")
-                .args(["-s", "-f", "html", "-t", "rtf"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .spawn()
-                .context("Couldn't start pandoc")?;
-
-            cmd.stdin
-                .as_mut()
-                .expect("Can't get stdin pipe")
-                .write_all(html.as_bytes())
-                .context("Couldn't write to pandoc stdin")?;
-            let output = cmd
-                .wait_with_output()
-                .context("while getting pandoc output")?;
-
-            let file = String::from_utf8(output.stdout).context("pandoc output not utf-8")?;
-
-            downloader.save(final_filename, file)
+            downloader.convert_and_save(final_filename, html, "html", "rtf")
         })
     }
 }

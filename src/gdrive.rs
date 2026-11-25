@@ -10,7 +10,6 @@ pub(crate) async fn drive_hub(
     flow_delegate: Option<Box<dyn yup_oauth2::authenticator_delegate::InstalledFlowDelegate>>,
     token_cache: Option<std::path::PathBuf>,
 ) -> Hub {
-    println!("Opening drive hub with token cache: {token_cache:?}");
     let secret = yup_oauth2::read_application_secret("clientsecret.json")
         .await
         .expect("clientsecret.json");

@@ -4,12 +4,18 @@ mod downloadables;
 mod gdrive;
 mod gui;
 
-use std::{fs::File, io::Cursor, path::PathBuf, time::Duration};
+use std::{
+    fs::File,
+    io::{Cursor, Write as _},
+    path::PathBuf,
+    process::{Command, Stdio},
+};
 
 use anyhow::{anyhow, Context as _};
 use bytes::Bytes;
 use clap::{Args, Parser, Subcommand};
 use eframe::egui;
+use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Url;
 
 #[derive(Parser, Debug)]
@@ -73,6 +79,26 @@ impl std::io::Read for InputReader {
 }
 
 impl FileInput {
+    pub fn name(&self) -> String {
+        match self {
+            FileInput::Local(path_buf) => path_buf
+                .file_stem()
+                .expect("no file stem")
+                .to_string_lossy()
+                .to_string(),
+            FileInput::Remote(url) => {
+                let id = url
+                    .path()
+                    .strip_prefix("/spreadsheets/d/")
+                    .expect("not a spreadsheet url")
+                    .split('/')
+                    .next()
+                    .expect("there should always be one");
+                id.to_string()
+            }
+        }
+    }
+
     async fn csv_reader(&self) -> Result<csv::Reader<InputReader>, anyhow::Error> {
         Ok(match self {
             FileInput::Local(path_buf) => {
@@ -88,10 +114,9 @@ impl FileInput {
                     .expect("there should always be one");
                 let url =
                     format!("https://docs.google.com/spreadsheets/d/{id}/gviz/tq?tqx=out:csv");
-                println!("Requesting: {url}");
-                csv::ReaderBuilder::default().from_reader(InputReader::Remote(Cursor::new(
-                    reqwest::get(url).await?.bytes().await?,
-                )))
+                let response = reqwest::get(url).await?;
+                csv::ReaderBuilder::default()
+                    .from_reader(InputReader::Remote(Cursor::new(response.bytes().await?)))
             }
         })
     }
@@ -137,6 +162,37 @@ struct Downloader<'a> {
 }
 
 impl Downloader<'_> {
+    fn convert_and_save<F, D>(
+        &self,
+        file_name: F,
+        data: D,
+        from: &str,
+        to: &str,
+    ) -> Result<(), anyhow::Error>
+    where
+        F: AsRef<std::ffi::OsStr>,
+        D: AsRef<[u8]>,
+    {
+        let mut cmd = Command::new("pandoc")
+            .args(["-s", "-f", from, "-t", to])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .context("Couldn't start pandoc")?;
+
+        cmd.stdin
+            .as_mut()
+            .expect("Can't get stdin pipe")
+            .write_all(data.as_ref())
+            .context("Couldn't write to pandoc stdin")?;
+        let output = cmd
+            .wait_with_output()
+            .context("while getting pandoc output")?;
+
+        let data = output.stdout;
+        self.save(file_name, data)
+    }
+
     fn save<F, D>(&self, file_name: F, data: D) -> Result<(), anyhow::Error>
     where
         F: AsRef<std::ffi::OsStr>,
@@ -186,19 +242,19 @@ impl Downloader<'_> {
     }
 }
 
-fn main() -> Result<(), anyhow::Error> {
-    let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
-    let _enter = rt.enter();
-    std::thread::spawn(move || {
-        rt.block_on(async {
-            loop {
-                tokio::time::sleep(Duration::from_secs(3600)).await;
-            }
-        })
-    });
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    // let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
+    // let _enter = rt.enter();
+    // std::thread::spawn(move || {
+    //     rt.block_on(async {
+    //         loop {
+    //             tokio::time::sleep(Duration::from_secs(3600)).await;
+    //         }
+    //     })
+    // });
 
     let cli = Cli::parse();
-    println!("{cli:?}");
     match cli.cmd {
         None => {
             // GUI!
@@ -214,18 +270,54 @@ fn main() -> Result<(), anyhow::Error> {
             .map_err(|e| anyhow::anyhow!("E: {e:?}"))?)
         }
         Some(Commands::DownloadImages(download_images)) => {
+            let bar = ProgressBar::new(10_000).with_style(
+                ProgressStyle::with_template(
+                    "[{elapsed_precise}]{msg} {wide_bar:.cyan/blue} {percent}%",
+                )
+                .expect("bad ProgressStyle"),
+            );
             let (tx, rx) = std::sync::mpsc::channel();
 
-            tokio::spawn(async move {
+            let dl = tokio::spawn(async move {
                 let hub = gdrive::drive_hub(None, cli.token_cache).await;
-                downloadables::download(download_images, &hub, |curr, max| {
-                    let _ = tx.send((curr, max));
+                let tx2 = tx.clone();
+                let fetch_failures = downloadables::download(download_images, &hub, |status| {
+                    let _ = tx.send(Some(status.clone()));
                 })
                 .await
                 .expect("failed to download images");
+                let _ = tx2.send(None);
+
+                fetch_failures
             });
-            while let Ok((curr, max)) = rx.recv() {
-                println!("{}%", (curr as f32 / max as f32) * 100.0);
+
+            while let Ok(status) = rx.recv() {
+                if let Some(status) = status {
+                    bar.set_position(
+                        ((status.done as f32 / status.total as f32) * 10_000.0) as u64,
+                    );
+                    let mut msg = String::new();
+                    if let Some(creator) = status.creator {
+                        msg += &creator;
+                    }
+                    if let Some(column) = status.column {
+                        msg += &format!("({column})");
+                    }
+                    if !msg.is_empty() {
+                        msg = format!(" {msg}");
+                    }
+                    bar.set_message(msg);
+                } else {
+                    bar.finish_with_message(" Download Complete");
+                    break;
+                }
+            }
+            let fetch_failures = dl.await?;
+            if !fetch_failures.is_empty() {
+                println!("\n\nFetch Failures:")
+            }
+            for downloadables::FetchFailure { filename, url } in fetch_failures {
+                println!("{filename}: {url}",);
             }
             Ok(())
         }

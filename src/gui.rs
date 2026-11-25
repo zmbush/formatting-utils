@@ -322,7 +322,10 @@ impl eframe::App for Ui {
                                         ),
                                     },
                                     &hub,
-                                    move |curr, max| {
+                                    move |status| {
+                                        let curr = status.done;
+                                        let max = status.total;
+
                                         if curr < max {
                                             *download_percent.lock().unwrap() =
                                                 Some(curr as f32 / max as f32);

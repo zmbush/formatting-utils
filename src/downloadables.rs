@@ -11,11 +11,24 @@ use std::{collections::HashMap, future::Future, path::PathBuf, pin::Pin};
 
 mod ellipsus;
 
+#[derive(Debug, Default, Clone)]
+pub(crate) struct DownloadStatus {
+    pub(crate) done: usize,
+    pub(crate) total: usize,
+    pub(crate) creator: Option<String>,
+    pub(crate) column: Option<String>,
+}
+
+pub(crate) struct FetchFailure {
+    pub(crate) filename: String,
+    pub(crate) url: String,
+}
+
 pub(crate) async fn download(
     download_images: DownloadImages,
     drive_hub: &gdrive::Hub,
-    mut status: impl FnMut(usize, usize),
-) -> Result<(), anyhow::Error> {
+    mut status: impl FnMut(&DownloadStatus),
+) -> Result<Vec<FetchFailure>, anyhow::Error> {
     let DownloadImages {
         creator_column,
         extra_info_column,
@@ -49,8 +62,7 @@ pub(crate) async fn download(
 
     let mut output_dir = PathBuf::new();
     output_dir.push("outputs");
-    output_dir.push("ANSOTEHUNATOHEUNTAHOEU");
-    // output_dir.push(filename.file_stem().unwrap());
+    output_dir.push(file.name());
 
     let file = file
         .csv_reader()
@@ -59,14 +71,21 @@ pub(crate) async fn download(
         .collect::<Vec<_>>();
     let max = file.len();
 
-    status(0, max);
+    let mut failures = Vec::new();
+    let mut st = DownloadStatus {
+        total: max,
+        ..Default::default()
+    };
     for (i, row) in file.into_iter().enumerate() {
-        status(i + 1, max);
-
         let row = row?;
+        let contrib = &row[&creator_column];
+        st.creator = Some(contrib.clone());
+        status(&st);
 
         for image_column in &image_column {
-            let contrib = &row[&creator_column];
+            st.column = Some(image_column.suffix.clone());
+            status(&st);
+
             let url = &row[&image_column.column];
 
             let extra_info = extra_info_column
@@ -85,15 +104,18 @@ pub(crate) async fn download(
                 continue;
             }
             if !downloadables.download(url, &downloader).await {
-                println!(
-                    "{contrib}'s file in column `{}` needs a manual download: {url}",
-                    image_column.column,
-                );
+                failures.push(FetchFailure {
+                    filename: downloader.file_name("file.EXT"),
+                    url: url.clone(),
+                });
             }
         }
+        st.done = i + 1;
+        status(&st);
     }
 
-    Ok(())
+    status(&st);
+    Ok(failures)
 }
 
 pub(crate) trait Downloadable<C: Connector>: Send + Sync {
