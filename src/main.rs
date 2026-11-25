@@ -244,16 +244,6 @@ impl Downloader<'_> {
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    // let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
-    // let _enter = rt.enter();
-    // std::thread::spawn(move || {
-    //     rt.block_on(async {
-    //         loop {
-    //             tokio::time::sleep(Duration::from_secs(3600)).await;
-    //         }
-    //     })
-    // });
-
     let cli = Cli::parse();
     match cli.cmd {
         None => {
